@@ -1,8 +1,7 @@
 const fs = require('fs');
 const axios = require('axios');
 const puppeteer = require('puppeteer');
-
-const CONCURRENCY = 10; // Số acc chạy song song
+const path = require('path');
 
 function randomUsername() {
   return 'user' + Math.random().toString(36).substring(2, 10);
@@ -16,43 +15,59 @@ function randomPassword() {
   );
 }
 
-async function getMailToken(email, mailPassword) {
-  const res = await axios.post('https://api.mail.tm/token', {
+async function getMailToken(email, password) {
+  const response = await axios.post('https://api.mail.tm/token', {
     address: email,
-    password: mailPassword
+    password
   });
-  return res.data.token;
+  return response.data.token;
 }
 
 async function getVerifyCode(token) {
   const headers = { Authorization: `Bearer ${token}` };
   let tries = 0;
 
-  while (tries < 12) {
+  while (tries < 10) {
     const res = await axios.get('https://api.mail.tm/messages', { headers });
-    const mail = res.data['hydra:member'].find(m => m.from?.address.includes('garena'));
-    if (mail) {
-      const content = await axios.get(`https://api.mail.tm/messages/${mail.id}`, { headers });
-      const code = content.data.text.match(/\d{6}/);
+    const garenaMail = res.data['hydra:member'].find(m =>
+      m.from && m.from.address.includes('garena')
+    );
+
+    if (garenaMail) {
+      const mailContent = await axios.get(`https://api.mail.tm/messages/${garenaMail.id}`, { headers });
+      const code = mailContent.data.text.match(/\d{6}/);
       return code ? code[0] : null;
     }
+
+    console.log('⌛ Đợi mã xác minh...');
     await new Promise(r => setTimeout(r, 5000));
     tries++;
   }
 
-  throw new Error('Không nhận được mã xác nhận từ Garena');
+  throw new Error('Không tìm thấy mã xác nhận!');
 }
 
-async function registerGarena(email, mailPassword, index, allEmails) {
+async function registerAccount(email, mailPass) {
   const username = randomUsername();
   const password = randomPassword();
 
-  try {
-    const token = await getMailToken(email, mailPassword);
+  console.log(`\n📩 Đang xử lý: ${email}`);
 
-    const browser = await puppeteer.launch({ headless: true, args: ['--no-sandbox'] });
-    const page = await browser.newPage();
-    await page.goto('https://account.garena.com/register', { timeout: 60000 });
+  let token;
+  try {
+    token = await getMailToken(email, mailPass);
+    console.log('✅ Đăng nhập mail thành công!');
+  } catch (err) {
+    console.error(`❌ Lỗi đăng nhập mail ${email}: ${err.message}`);
+    return false;
+  }
+
+  const browser = await puppeteer.launch({ headless: true });
+  const page = await browser.newPage();
+
+  try {
+    await page.goto('https://account.garena.com/register', { waitUntil: 'networkidle2' });
+    await page.waitForSelector('input[name="email"]', { timeout: 15000 });
 
     await page.type('input[name="email"]', email);
     await page.type('input[name="username"]', username);
@@ -64,37 +79,40 @@ async function registerGarena(email, mailPassword, index, allEmails) {
     await page.type('input[name="verify_code"]', verifyCode);
     await page.click('button.confirm');
 
-    console.log(`✅ Thành công: ${email} | ${username} | ${password}`);
-
-    // Tạo thư mục và file nếu chưa có
     if (!fs.existsSync('res')) fs.mkdirSync('res');
-    const savePath = 'res/registered_accounts.txt';
-    fs.appendFileSync(savePath, `${email}|${username}|${password}\n`);
 
-    // Xóa dòng email đã dùng khỏi emails.txt
-    allEmails[index] = null;
-    fs.writeFileSync('emails.txt', allEmails.filter(line => line).join('\n'));
-
+    const accInfo = `${email}|${mailPass}|${username}|${password}\n`;
+    fs.appendFileSync(path.join('res', 'accounts.txt'), accInfo);
+    console.log(`✅ Đăng ký thành công: ${username}`);
     await browser.close();
+    return true;
   } catch (err) {
-    console.error(`❌ ${email} - lỗi: ${err.message}`);
+    console.error(`❌ Lỗi đăng ký ${email}: ${err.message}`);
+    await page.screenshot({ path: `res/error-${Date.now()}.png` });
+    await browser.close();
+    return false;
   }
 }
 
 (async () => {
-  let lines = fs.readFileSync('emails.txt', 'utf8').trim().split('\n');
-  const tasks = lines.map((line, index) => {
-    const [email, mailPassword] = line.trim().split('|');
-    return () => registerGarena(email, mailPassword, index, lines);
-  });
-
-  // Chạy theo nhóm (batch) CONCURRENCY acc 1 lúc
-  async function runBatch(tasks, batchSize) {
-    for (let i = 0; i < tasks.length; i += batchSize) {
-      const batch = tasks.slice(i, i + batchSize).map(fn => fn());
-      await Promise.allSettled(batch); // không dừng nếu lỗi
-    }
+  if (!fs.existsSync('mails.txt')) {
+    console.error('⚠️ Không tìm thấy mails.txt');
+    return;
   }
 
-  await runBatch(tasks, CONCURRENCY);
+  let emails = fs.readFileSync('mails.txt', 'utf8').trim().split('\n');
+  const toRegister = emails.slice(0, 20); // lấy 20 email đầu tiên
+
+  for (let line of toRegister) {
+    const [email, pass] = line.trim().split('|');
+    if (!email || !pass) continue;
+
+    await registerAccount(email, pass);
+  }
+
+  // Cập nhật lại mails.txt: xóa 20 dòng đầu
+  emails = emails.slice(20);
+  fs.writeFileSync('mails.txt', emails.join('\n'), 'utf8');
+
+  console.log('\n🎉 Hoàn tất xử lý 20 tài khoản!');
 })();
