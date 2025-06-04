@@ -7,7 +7,7 @@ jobs:
   register:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v3
 
       - name: Setup Node.js
@@ -16,7 +16,7 @@ jobs:
           node-version: 18
 
       - name: Install dependencies
-        run: npm install axios
+        run: npm install
 
-      - name: Run register script
+      - name: Run registration script
         run: node register.js
